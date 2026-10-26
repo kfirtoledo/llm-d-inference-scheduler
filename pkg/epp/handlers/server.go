@@ -177,6 +177,10 @@ type RequestContext struct {
 	responseStatusCode         string
 	requestRunning             bool
 
+	// sseLineCarry is the partial last SSE line of the previous response chunk.
+	sseLineCarry      []byte
+	sseLineDiscarding bool
+
 	toolCallingSurface             reqcommon.APIType
 	toolCallingRequest             bool
 	toolCallingResponseEventStream bool
