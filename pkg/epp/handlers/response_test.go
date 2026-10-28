@@ -1055,6 +1055,16 @@ func TestCompleteSSELines(t *testing.T) {
 			want:   []string{"a\n", "b\n", "c"},
 		},
 		{
+			name:   "oversized complete line dropped without skipping the next chunk",
+			chunks: []string{"a\n" + oversized + "x\n", "b\n"},
+			want:   []string{"a\n", "b\n"},
+		},
+		{
+			name:   "short lines over the cap in total kept",
+			chunks: []string{strings.Repeat(strings.Repeat("y", 1023)+"\n", 5000), "b\n"},
+			want:   []string{strings.Repeat(strings.Repeat("y", 1023)+"\n", 5000), "b\n"},
+		},
+		{
 			name:   "oversized last line at end of stream dropped",
 			chunks: []string{"a\n" + oversized, "x"},
 			want:   []string{"a\n", ""},
@@ -1701,4 +1711,50 @@ func BenchmarkObserveToolCallingResponse(b *testing.B) {
 			}
 		}
 	}
+}
+
+// TestUsageFinalEventWins asserts the recorded usage is the final usage event
+// of the stream, even when an ext_proc boundary falls inside a usage line.
+func TestUsageFinalEventWins(t *testing.T) {
+	hdr := map[string]string{"content-type": "text/event-stream"}
+	usageLine := func(c int) string {
+		return fmt.Sprintf("data: {\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":%d,\"total_tokens\":%d}}\n", c, 5+c)
+	}
+
+	server := &StreamingServer{
+		parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+		director:       &mockDirector{},
+	}
+	reqCtx := &RequestContext{
+		Response:          &Response{Headers: hdr},
+		SchedulingRequest: &fwksched.InferenceRequest{FairnessID: reqcommon.DefaultFairnessID},
+	}
+	chunks := []string{
+		usageLine(1) + `data: {"usage":{"prompt_tokens":5,"completion_to`,
+		`kens":2,"total_tokens":7}}` + "\n" + usageLine(3),
+	}
+	for i, c := range chunks {
+		server.HandleResponseBody(context.Background(), reqCtx, []byte(c), i == len(chunks)-1)
+	}
+
+	assert.Equal(t, 3, reqCtx.Usage.CompletionTokens, "the final usage event must win")
+	assert.Equal(t, 8, reqCtx.Usage.TotalTokens)
+}
+
+// TestCapAppliesToWholeLine asserts maxSSELineBytes bounds every line,
+// not only the one carried across chunks.
+func TestCapAppliesToWholeLine(t *testing.T) {
+	t.Run("oversized line complete in one chunk", func(t *testing.T) {
+		reqCtx := &RequestContext{}
+		got := completeSSELines(context.Background(), reqCtx,
+			[]byte(strings.Repeat("x", maxSSELineBytes+1)+"\n"), false)
+		assert.Empty(t, got, "a line over the cap must be dropped")
+	})
+
+	t.Run("oversized line closed by a later chunk", func(t *testing.T) {
+		reqCtx := &RequestContext{}
+		completeSSELines(context.Background(), reqCtx, []byte(strings.Repeat("x", maxSSELineBytes-10)), false)
+		got := completeSSELines(context.Background(), reqCtx, []byte(strings.Repeat("y", 100)+"\n"), false)
+		assert.Empty(t, got, "a line over the cap must be dropped")
+	})
 }

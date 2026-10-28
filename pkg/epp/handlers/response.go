@@ -167,14 +167,48 @@ func completeSSELines(ctx context.Context, reqCtx *RequestContext, chunk []byte,
 	case len(tail) > 0:
 		reqCtx.sseLineCarry = bytes.Clone(tail)
 	}
-	return data
+	return dropOversizedLines(ctx, data)
+}
+
+// dropOversizedLines removes the lines of data longer than maxSSELineBytes, copying only when one is dropped.
+func dropOversizedLines(ctx context.Context, data []byte) []byte {
+	if len(data) <= maxSSELineBytes {
+		return data
+	}
+	var kept []byte
+	dropped := false
+	for start := 0; start < len(data); {
+		end := len(data)
+		if i := bytes.IndexByte(data[start:], '\n'); i >= 0 {
+			end = start + i + 1
+		}
+		line := data[start:end]
+		if len(bytes.TrimSuffix(line, []byte("\n"))) > maxSSELineBytes {
+			if !dropped {
+				logSSELineDrop(ctx)
+				kept = append(kept, data[:start]...)
+				dropped = true
+			}
+		} else if dropped {
+			kept = append(kept, line...)
+		}
+		start = end
+	}
+	if !dropped {
+		return data
+	}
+	return kept
 }
 
 // dropSSELine drops the line being read and, mid-stream, skips the rest of it up to its newline.
 func dropSSELine(ctx context.Context, reqCtx *RequestContext, endOfStream bool) {
-	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized SSE line from response parsing", "limit", maxSSELineBytes)
+	logSSELineDrop(ctx)
 	reqCtx.sseLineCarry = nil
 	reqCtx.sseLineDiscarding = !endOfStream
+}
+
+func logSSELineDrop(ctx context.Context) {
+	log.FromContext(ctx).V(logutil.DEFAULT).Info("dropping oversized SSE line from response parsing", "limit", maxSSELineBytes)
 }
 
 // mergeUsage folds a parsed usage block into the usage accumulated for the request.
